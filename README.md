@@ -37,7 +37,7 @@ results/algorithm_rois.xlsx
 ```
 
 ## Python Port (Parity Baseline)
-A Python baseline is included so the pipeline can run without a MATLAB license while preserving thesis logic.
+A Python implementation is included so the pipeline can run without a MATLAB license while mirroring the original MATLAB workflow.
 
 ### Implementation Notes
 - The activity map uses pixel-wise standard deviation across frames.
@@ -59,18 +59,6 @@ python calc_catch.py \
   --metrics-json results/metrics_python.json
 ```
 
-### Parity Gate Against MATLAB Baseline
-```bash
-python calc_catch.py \
-  --tiff data/example_stack.tif \
-  --coords data/example_manual_roi_coordinates.xlsx \
-  --expected-matching-indicator 0.59 \
-  --indicator-tolerance 0.02 \
-  --no-excel
-```
-
-This exits non-zero if matching indicator drifts outside tolerance.
-
 ## MATLAB Scripts
 - `CalcCatch.m`: Current MATLAB pipeline.
 
@@ -80,3 +68,5 @@ This exits non-zero if matching indicator drifts outside tolerance.
 
 ## License
 MIT. See `LICENSE`.
+
+
