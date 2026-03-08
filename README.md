@@ -47,7 +47,7 @@ output_excel_file    = 'results/algorithm_rois.xlsx';
 Key parameters are documented in the MATLAB scripts, including sliding window thresholds, consistency criteria, ROI size filtering, and watershed depth (`h`). This supports controlled tuning across experiments while preserving reproducibility.
 
 ## Repository Contents
-- `ROI_recognition(CalcCatch)_annotated.m`: Automated ROI detection, consistency scoring, and ROI export.
+- `CalcCatch.m`: Automated ROI detection, consistency scoring, and ROI export.
 - `metrics_algorithm.m`: Connectivity and graph metrics for algorithm-derived ROIs.
 - `metrics_manual.m`: Connectivity and graph metrics for manually annotated ROIs.
 - `binary_distance(graph_metric_test.m`: Binary distance and graph metric test script.
@@ -56,6 +56,7 @@ Key parameters are documented in the MATLAB scripts, including sliding window th
 
 ## Quick Start
 1. Place your own TIFF stack and ROI coordinate spreadsheet in `data/`.
-2. Adjust paths and tunable parameters in `ROI_recognition(CalcCatch)_annotated.m`.
+2. Adjust paths and tunable parameters in `CalcCatch.m`.
 3. Run ROI extraction.
 4. Run connectivity and graph metric scripts for network analysis.
+
