@@ -28,14 +28,10 @@ CalcCatch achieved a matching indicator of approximately **0.59**, more than dou
 ## AI-Augmented Development
 ChatGPT 4o was used in a limited capacity for debugging index errors, restructuring for readability, and adjusting figure formatting. We manually verified all data processing and analytical logic to ensure biological and mathematical accuracy.
 
-## Data Integrity Protocol
-This repository is maintained as a code-first, reproducible release. Do not upload proprietary raw imaging data.
+## File Setup
+Place your local input files in the data/ directory and point CalcCatch.m to those paths.
 
-- Raw `.tif` and related lab data should stay local and outside version control.
-- Use the `data/` folder as a local mount point for your own input files.
-- Keep file references in scripts pointed to dummy-style project paths, then adapt locally.
-
-Example local paths to use:
+Default dummy paths in CalcCatch.m:
 
 ```matlab
 tiff_stack_path      = 'data/example_stack.tif';
@@ -43,20 +39,35 @@ original_coordinates = 'data/example_manual_roi_coordinates.xlsx';
 output_excel_file    = 'results/algorithm_rois.xlsx';
 ```
 
+## Generate Synthetic Sample Data
+Run the generator script in MATLAB:
+
+```matlab
+generate_sample_data
+```
+
+This creates:
+- `data/example_stack.tif`
+- `data/example_manual_roi_coordinates.xlsx` (sheet name: `xy coord`)
+
+Then run:
+
+```matlab
+CalcCatch
+```
+
 ## Reproducibility and Parameter Transparency
 Key parameters are documented in the MATLAB scripts, including sliding window thresholds, consistency criteria, ROI size filtering, and watershed depth (`h`). This supports controlled tuning across experiments while preserving reproducibility.
 
 ## Repository Contents
-- `CalcCatch.m`: Automated ROI detection, consistency scoring, and ROI export.
-- `metrics_algorithm.m`: Connectivity and graph metrics for algorithm-derived ROIs.
-- `metrics_manual.m`: Connectivity and graph metrics for manually annotated ROIs.
-- `binary_distance(graph_metric_test.m`: Binary distance and graph metric test script.
-- `Final_Thesis_Copy.pdf`: Thesis reference for methods and benchmark context.
-- `data/`: Placeholder directory for user-supplied local data only.
+- `CalcCatch.m`: Main ROI detection pipeline.
+- `generate_sample_data.m`: Synthetic data generator for local testing.
+- `README.md`: Project documentation.
+- `LICENSE`: MIT license.
+- `data/`: Local data placeholder directory with ignore rules.
 
 ## Quick Start
-1. Place your own TIFF stack and ROI coordinate spreadsheet in `data/`.
-2. Adjust paths and tunable parameters in `CalcCatch.m`.
-3. Run ROI extraction.
-4. Run connectivity and graph metric scripts for network analysis.
+1. Run `generate_sample_data` in MATLAB.
+2. Confirm sample files were created in `data/`.
+3. Run `CalcCatch`.
 
