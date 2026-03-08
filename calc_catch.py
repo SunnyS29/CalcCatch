@@ -16,7 +16,6 @@ and graph-theoretical connectivity analyses.
 
 import argparse
 import json
-import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -57,23 +56,21 @@ class CalcCatchResult:
     output_excel_file: str | None
 
 
+def _normalize_header(value: Any) -> str:
+    return ' '.join(str(value).strip().lower().replace('_', ' ').split())
+
+
 def _to_hwf_stack(stack_path: Path) -> np.ndarray:
     """Load TIFF data and enforce MATLAB-compatible (height, width, frames) order."""
     with tifffile.TiffFile(stack_path) as tf:
         num_pages = len(tf.pages)
-        arr = tf.asarray()
+        arr = np.asarray(tf.asarray())
 
-    arr = np.asarray(arr)
     if arr.ndim == 2:
         arr = arr[..., np.newaxis]
-    elif arr.ndim == 3:
-        if arr.shape[0] == num_pages and arr.shape[-1] != num_pages:
-            arr = np.transpose(arr, (1, 2, 0))
-        elif arr.shape[-1] == num_pages:
-            pass
-        elif arr.shape[0] <= arr.shape[1] and arr.shape[0] <= arr.shape[2]:
-            arr = np.transpose(arr, (1, 2, 0))
-    else:
+    elif arr.ndim == 3 and arr.shape[0] == num_pages and arr.shape[-1] != num_pages:
+        arr = np.transpose(arr, (1, 2, 0))
+    elif arr.ndim != 3:
         raise ValueError(f'Unsupported TIFF dimensions: {arr.shape}')
 
     return arr.astype(np.uint16, copy=False)
@@ -81,16 +78,14 @@ def _to_hwf_stack(stack_path: Path) -> np.ndarray:
 
 def _find_column(df: pd.DataFrame, aliases: tuple[str, ...]) -> str:
     """Resolve flexible column naming while preserving thesis spreadsheet compatibility."""
-    candidates = []
-    for col in df.columns:
-        normalized = ' '.join(str(col).strip().lower().replace('_', ' ').split())
-        candidates.append((str(col), normalized))
+    normalized_columns = [(_normalize_header(col), str(col)) for col in df.columns]
 
     for alias in aliases:
-        key = ' '.join(alias.strip().lower().replace('_', ' ').split())
-        for original, normalized in candidates:
+        key = _normalize_header(alias)
+        for normalized, original in normalized_columns:
             if normalized == key or normalized.startswith(f'{key}.'):
                 return original
+
     raise KeyError(f'Could not find any of {aliases} in columns {list(df.columns)}')
 
 
@@ -105,8 +100,13 @@ def _load_landmark_centroids(path: Path) -> np.ndarray:
         except KeyError:
             continue
 
-        centroids = df[[x_col, y_col]].apply(pd.to_numeric, errors='coerce').dropna().to_numpy(dtype=np.float64)
-        if centroids.shape[0] > 0:
+        centroids = (
+            df[[x_col, y_col]]
+            .apply(pd.to_numeric, errors='coerce')
+            .dropna()
+            .to_numpy(dtype=np.float64)
+        )
+        if centroids.size:
             return centroids
 
     raise KeyError('Could not parse x/y centroid columns from sheet "xy coord".')
@@ -120,8 +120,56 @@ def _imhmin_like(image: np.ndarray, h: float) -> np.ndarray:
     """
     if h <= 0:
         return image
-    seed = image + h
-    return reconstruction(seed, image, method='erosion')
+    return reconstruction(image + h, image, method='erosion')
+
+
+def _build_threshold_mask(
+    stddev_matrix: np.ndarray,
+    number_of_steps: int,
+    consistency_check: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    std_max = float(np.max(stddev_matrix))
+    std_min = float(np.min(stddev_matrix))
+    stddev_range = np.linspace(std_max, std_min, number_of_steps)
+    window_overlap = 0.1 * (std_max - std_min)
+    window_starts = stddev_range - window_overlap / 2.0
+    window_ends = stddev_range + window_overlap / 2.0
+
+    # Sliding-window consensus mask with 10% overlap in the standard-deviation domain.
+    pixel_count = np.zeros(stddev_matrix.shape, dtype=np.uint32)
+    for start, end in zip(window_starts, window_ends):
+        pixel_count += ((stddev_matrix >= start) & (stddev_matrix <= end)).astype(np.uint32)
+
+    minimum_windows = int(np.ceil(consistency_check * number_of_steps))
+    threshold_mask = pixel_count >= minimum_windows
+    return threshold_mask, window_starts, window_ends
+
+
+def _build_watershed_regions(threshold_mask: np.ndarray, h: float, strict_mode: bool) -> np.ndarray:
+    """Generate watershed-separated ROI regions using MATLAB-compatible semantics."""
+    # Negative distance transform mirrors: -bwdist(~threshold_mask)
+    dist_trans = -distance_transform_edt(threshold_mask)
+
+    if strict_mode:
+        # MATLAB equivalent:
+        # dist_trans = -bwdist(~threshold_mask);
+        # dist_trans(~threshold_mask) = -Inf;
+        # new_boundaries = watershed(imhmin(dist_trans, h));
+        dist_trans[~threshold_mask] = -1e12  # finite surrogate for -Inf
+        dist_trans_mod = _imhmin_like(dist_trans, h)
+        labels = watershed(dist_trans_mod, connectivity=2, watershed_line=True)
+        ridges = labels == 0
+        ridges = binary_dilation(ridges, structure=disk(1))
+        return ~ridges
+
+    # Conservative variant that constrains watershed to active mask.
+    floor_val = float(np.min(dist_trans[threshold_mask])) - 1.0 if np.any(threshold_mask) else -1.0
+    dist_trans[~threshold_mask] = floor_val
+    dist_trans_mod = _imhmin_like(dist_trans, h)
+    labels = watershed(dist_trans_mod, mask=threshold_mask, connectivity=2, watershed_line=True)
+    ridges = labels == 0
+    ridges = binary_dilation(ridges, structure=disk(1))
+    return threshold_mask & (~ridges)
 
 
 def _matching_with_candidate_resolution(
@@ -160,65 +208,65 @@ def _matching_with_candidate_resolution(
     return tp, fn, fp, indicator
 
 
+def _compute_roi_consistency(
+    roi_std_values: list[np.ndarray],
+    window_starts: np.ndarray,
+    window_ends: np.ndarray,
+    consistency_pixel_frac: float,
+) -> np.ndarray:
+    """Compute per-ROI consistency scores using the same threshold-window rule as MATLAB."""
+    scores = np.zeros(len(roi_std_values), dtype=np.int64)
+    for i, roi_std in enumerate(roi_std_values):
+        sorted_std = np.sort(roi_std)
+        threshold_pixels = int(np.ceil(consistency_pixel_frac * sorted_std.size))
+        left = np.searchsorted(sorted_std, window_starts, side='left')
+        right = np.searchsorted(sorted_std, window_ends, side='right')
+        active_counts = right - left
+        scores[i] = int(np.sum(active_counts >= threshold_pixels))
+    return scores
+
+
+def _write_excel_output(
+    output_path: Path,
+    roi_table_rows: list[dict[str, float]],
+    roi_time_series: np.ndarray,
+    time_vector: np.ndarray,
+) -> str:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    roi_df = pd.DataFrame(roi_table_rows)
+    time_df = pd.DataFrame(roi_time_series, columns=[f'ROI_{i + 1}' for i in range(roi_time_series.shape[1])])
+    time_df.insert(0, 'Time', time_vector)
+
+    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+        roi_df.to_excel(writer, sheet_name='ROI_Data', index=False)
+        time_df.to_excel(writer, sheet_name='Time_Series', index=False)
+
+    return str(output_path)
+
+
 def run_calc_catch(config: CalcCatchConfig) -> CalcCatchResult:
     """Run the MATLAB-parity ROI pipeline and return summary metrics."""
-    tiff_path = Path(config.tiff_stack_path)
-    coord_path = Path(config.original_coordinates_path)
-    output_path = Path(config.output_excel_file)
+    stack = _to_hwf_stack(Path(config.tiff_stack_path))
+    landmark_centroids = _load_landmark_centroids(Path(config.original_coordinates_path))
 
-    stack = _to_hwf_stack(tiff_path)
     img_height, img_width, num_frames = stack.shape
     time_vector = np.arange(num_frames, dtype=np.float64) / config.frame_rate
-
-    landmark_centroids = _load_landmark_centroids(coord_path)
 
     stack_float = stack.astype(np.float64)
     # Pixel-wise standard deviation over time replicates MATLAB std(...,0,3).
     stddev_matrix = np.std(stack_float, axis=2, ddof=0)
 
-    std_max = float(np.max(stddev_matrix))
-    std_min = float(np.min(stddev_matrix))
-    stddev_range = np.linspace(std_max, std_min, config.number_of_steps)
-    window_overlap = 0.1 * (std_max - std_min)
-    window_starts = stddev_range - window_overlap / 2.0
-    window_ends = stddev_range + window_overlap / 2.0
+    threshold_mask, window_starts, window_ends = _build_threshold_mask(
+        stddev_matrix,
+        config.number_of_steps,
+        config.consistency_check,
+    )
 
-    # Sliding-window consensus mask with 10% overlap in the standard-deviation domain.
-    pixel_count = np.zeros((img_height, img_width), dtype=np.uint32)
-    for start, end in zip(window_starts, window_ends):
-        pixel_count += ((stddev_matrix >= start) & (stddev_matrix <= end)).astype(np.uint32)
-
-    minimum_windows = int(math.ceil(config.consistency_check * config.number_of_steps))
-    threshold_mask = pixel_count >= minimum_windows
-
-    # Negative distance transform mirrors: -bwdist(~threshold_mask)
-    dist_trans = -distance_transform_edt(threshold_mask)
-
-    if config.matlab_strict_mode:
-        # MATLAB equivalent:
-        # dist_trans = -bwdist(~threshold_mask);
-        # dist_trans(~threshold_mask) = -Inf;
-        # new_boundaries = watershed(imhmin(dist_trans, h));
-        dist_trans[~threshold_mask] = -1e12  # finite surrogate for -Inf
-        # h-minima transformation with h=0.5 is the key anti-fragmentation control.
-        dist_trans_mod = _imhmin_like(dist_trans, float(config.h))
-        labels = watershed(dist_trans_mod, connectivity=2, watershed_line=True)
-        watershed_ridges = labels == 0
-        watershed_ridges = binary_dilation(watershed_ridges, structure=disk(1))
-        watershed_regions = ~watershed_ridges
-    else:
-        # Conservative variant that constrains watershed to active mask.
-        floor_val = float(np.min(dist_trans[threshold_mask])) - 1.0 if np.any(threshold_mask) else -1.0
-        dist_trans[~threshold_mask] = floor_val
-        dist_trans_mod = _imhmin_like(dist_trans, float(config.h))
-        labels = watershed(dist_trans_mod, mask=threshold_mask, connectivity=2, watershed_line=True)
-        watershed_ridges = labels == 0
-        watershed_ridges = binary_dilation(watershed_ridges, structure=disk(1))
-        watershed_regions = threshold_mask & (~watershed_ridges)
+    # h-minima transformation with h=0.5 is the key anti-fragmentation control.
+    watershed_regions = _build_watershed_regions(threshold_mask, float(config.h), config.matlab_strict_mode)
 
     cc_labels = label(watershed_regions, connectivity=2)
-    regions = [r for r in regionprops(cc_labels) if r.area >= config.min_roi_area]
-
+    regions = [region for region in regionprops(cc_labels) if region.area >= config.min_roi_area]
     detected_roi_count = len(regions)
 
     roi_table_rows: list[dict[str, float]] = []
@@ -232,7 +280,7 @@ def run_calc_catch(config: CalcCatchConfig) -> CalcCatchResult:
         roi_cube = stack_float[rr, cc, :]
 
         y_centre, x_centre = region.centroid
-        detected_centroids_xy[i, :] = [x_centre, y_centre]
+        detected_centroids_xy[i] = [x_centre, y_centre]
 
         roi_table_rows.append(
             {
@@ -246,14 +294,13 @@ def run_calc_catch(config: CalcCatchConfig) -> CalcCatchResult:
         roi_time_series[:, i] = np.mean(roi_cube, axis=0)
         roi_std_values.append(stddev_matrix[rr, cc])
 
-    roi_consistency = np.zeros(detected_roi_count, dtype=np.int64)
-    for i, roi_std in enumerate(roi_std_values):
-        sorted_std = np.sort(roi_std)
-        threshold_pixels = int(math.ceil(config.consistency_pixel_frac * sorted_std.size))
-        left = np.searchsorted(sorted_std, window_starts, side='left')
-        right = np.searchsorted(sorted_std, window_ends, side='right')
-        active_counts = right - left
-        roi_consistency[i] = int(np.sum(active_counts >= threshold_pixels))
+    # Retained for MATLAB-parity staging even though it is not exported directly.
+    _ = _compute_roi_consistency(
+        roi_std_values,
+        window_starts,
+        window_ends,
+        config.consistency_pixel_frac,
+    )
 
     # Contingency table matching against manual centroids.
     tp, fn, fp, indicator = _matching_with_candidate_resolution(
@@ -262,19 +309,14 @@ def run_calc_catch(config: CalcCatchConfig) -> CalcCatchResult:
         config.matching_tolerance,
     )
 
+    output_excel_file = None
     if config.write_excel:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        roi_df = pd.DataFrame(roi_table_rows)
-        time_df = pd.DataFrame(roi_time_series, columns=[f'ROI_{i+1}' for i in range(detected_roi_count)])
-        time_df.insert(0, 'Time', time_vector)
-
-        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-            roi_df.to_excel(writer, sheet_name='ROI_Data', index=False)
-            time_df.to_excel(writer, sheet_name='Time_Series', index=False)
-
-        output_excel_file = str(output_path)
-    else:
-        output_excel_file = None
+        output_excel_file = _write_excel_output(
+            Path(config.output_excel_file),
+            roi_table_rows,
+            roi_time_series,
+            time_vector,
+        )
 
     return CalcCatchResult(
         detected_roi_count=detected_roi_count,
