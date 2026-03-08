@@ -1,0 +1,14 @@
+# Proprietary or local experimental data
+data/*.tif
+data/*.tiff
+data/*.nd2
+data/*.czi
+data/*.xlsx
+!data/README.md
+!data/.gitignore
+
+# Generated outputs
+results/
+*.png
+Filtered_ROI_Data.xlsx
+Algorithm_ROIs.xlsx
