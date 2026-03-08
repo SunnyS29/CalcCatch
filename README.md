@@ -1,6 +1,6 @@
 # CalcCatch: A Statistical Pipeline for Automated ROI Detection and Functional Connectivity Analysis
 
-CalcCatch is a MATLAB-based pipeline for automated ROI detection and functional connectivity analysis in Enteric Nervous System (ENS) calcium imaging datasets.
+CalcCatch is a pipeline for automated ROI detection and functional connectivity analysis in Enteric Nervous System calcium imaging datasets.
 
 ## The Problem
 Manual ROI annotation for ENS neurons is a major bottleneck and can require up to 4 months of expert labor. CalcCatch was developed as a Master's project at the University of Melbourne to provide a scalable and objective alternative.
@@ -8,66 +8,75 @@ Manual ROI annotation for ENS neurons is a major bottleneck and can require up t
 ## The Workflow (The 5 Stations)
 
 ### Station 1: Data Ingestion
-We load 3D TIFF stacks into structured matrices and generate time vectors for temporal alignment.
+Load 3D TIFF stacks into structured matrices and generate time vectors for temporal alignment.
 
 ### Station 2: Activity Mapping
-We apply sliding window thresholding to pixel-wise temporal standard deviation and identify consistently active regions.
+Apply sliding window thresholding to pixel-wise standard deviation and identify consistently active regions.
 
 ### Station 3: Watershed Refinement
-We use a negative distance transform with h-minima transformation before watershed segmentation to suppress noise and reduce over-segmentation in dense neuron clusters.
+Use a negative distance transform with h-minima transformation before watershed segmentation to suppress noise and reduce over-segmentation in dense neuron clusters.
 
 ### Station 4: Connectivity Reconstruction
-We reconstruct functional networks using Pearson Correlation and Transfer Entropy. Pearson Correlation captures synchronous activity and Transfer Entropy captures directional information flow.
+Reconstruct functional networks using Pearson correlation and transfer entropy. Pearson correlation captures synchronous activity and transfer entropy captures directional information flow.
 
 ### Station 5: Network Characterization
-We quantify small-world structure and identify functional hub neurons through graph-theoretical metrics.
+Quantify small-world structure and identify functional hub neurons through graph-theoretical metrics.
 
 ## Performance
 CalcCatch achieved a matching indicator of approximately **0.59**, more than doubling the benchmark Detect MATLAB toolbox result (**0.30**).
 
-## AI-Augmented Development
-ChatGPT 4o was used in a limited capacity for debugging index errors, restructuring for readability, and adjusting figure formatting. We manually verified all data processing and analytical logic to ensure biological and mathematical accuracy.
-
 ## File Setup
-Place your local input files in the data/ directory and point CalcCatch.m to those paths.
+Place local inputs in `data/` and keep script paths pointed to project-relative files.
 
-Default dummy paths in CalcCatch.m:
+Default dummy paths:
 
-```matlab
-tiff_stack_path      = 'data/example_stack.tif';
-original_coordinates = 'data/example_manual_roi_coordinates.xlsx';
-output_excel_file    = 'results/algorithm_rois.xlsx';
+```text
+data/example_stack.tif
+data/example_manual_roi_coordinates.xlsx
+results/algorithm_rois.xlsx
 ```
 
-## Generate Synthetic Sample Data
-Run the generator script in MATLAB:
+## Python Port (Parity Baseline)
+A Python baseline is included so the pipeline can run without a MATLAB license while preserving thesis logic.
 
-```matlab
-generate_sample_data
+### Implementation Notes
+- The activity map uses pixel-wise standard deviation across frames.
+- Watershed refinement uses a MATLAB-equivalent h-minima transformation (`h=0.5`) to suppress shallow minima and prevent over-segmentation in dense ENS neuron clusters.
+- Validation uses contingency table matching with nearest-candidate centroid resolution.
+- The ROI time series export is compatible with downstream transfer entropy and graph-theory stages.
+
+### Install
+```bash
+pip install -r requirements.txt
 ```
 
-This creates:
-- `data/example_stack.tif`
-- `data/example_manual_roi_coordinates.xlsx` (sheet name: `xy coord`)
-
-Then run:
-
-```matlab
-CalcCatch
+### Run
+```bash
+python calc_catch.py \
+  --tiff data/example_stack.tif \
+  --coords data/example_manual_roi_coordinates.xlsx \
+  --output results/algorithm_rois_python.xlsx \
+  --metrics-json results/metrics_python.json
 ```
 
-## Reproducibility and Parameter Transparency
-Key parameters are documented in the MATLAB scripts, including sliding window thresholds, consistency criteria, ROI size filtering, and watershed depth (`h`). This supports controlled tuning across experiments while preserving reproducibility.
+### Parity Gate Against MATLAB Baseline
+```bash
+python calc_catch.py \
+  --tiff data/example_stack.tif \
+  --coords data/example_manual_roi_coordinates.xlsx \
+  --expected-matching-indicator 0.59 \
+  --indicator-tolerance 0.02 \
+  --no-excel
+```
 
-## Repository Contents
-- `CalcCatch.m`: Main ROI detection pipeline.
-- `generate_sample_data.m`: Synthetic data generator for local testing.
-- `README.md`: Project documentation.
-- `LICENSE`: MIT license.
-- `data/`: Local data placeholder directory with ignore rules.
+This exits non-zero if matching indicator drifts outside tolerance.
 
-## Quick Start
-1. Run `generate_sample_data` in MATLAB.
-2. Confirm sample files were created in `data/`.
-3. Run `CalcCatch`.
+## MATLAB Scripts
+- `CalcCatch.m`: Current MATLAB pipeline.
 
+## Python Scripts
+- `calc_catch.py`: Python parity baseline with ROI extraction, Excel export, and contingency table matching.
+- `requirements.txt`: Python dependencies.
+
+## License
+MIT. See `LICENSE`.
