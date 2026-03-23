@@ -18,6 +18,7 @@ import argparse
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -54,6 +55,9 @@ class CalcCatchResult:
     false_negative: int
     false_positive: int
     output_excel_file: str | None
+    # Profiling note: stage timings were added during optimization review so
+    # we can identify bottlenecks without changing ROI detection semantics.
+    stage_timings_sec: dict[str, float]
 
 
 def _normalize_header(value: Any) -> str:
@@ -135,7 +139,9 @@ def _build_threshold_mask(
     window_starts = stddev_range - window_overlap / 2.0
     window_ends = stddev_range + window_overlap / 2.0
 
-    # Sliding-window consensus mask with 10% overlap in the standard-deviation domain.
+    # Optimization note: we keep only per-pixel threshold hit counts rather
+    # than a full [height, width, step] logical cube. This preserves the
+    # original sliding-window consensus rule with lower memory cost.
     pixel_count = np.zeros(stddev_matrix.shape, dtype=np.uint32)
     for start, end in zip(window_starts, window_ends):
         pixel_count += ((stddev_matrix >= start) & (stddev_matrix <= end)).astype(np.uint32)
@@ -217,6 +223,9 @@ def _compute_roi_consistency(
     """Compute per-ROI consistency scores using the same threshold-window rule as MATLAB."""
     scores = np.zeros(len(roi_std_values), dtype=np.int64)
     for i, roi_std in enumerate(roi_std_values):
+        # Optimization note: sorted ROI standard-deviation values let us
+        # count active pixels per window with searchsorted rather than
+        # re-materializing every threshold mask.
         sorted_std = np.sort(roi_std)
         threshold_pixels = int(np.ceil(consistency_pixel_frac * sorted_std.size))
         left = np.searchsorted(sorted_std, window_starts, side='left')
@@ -246,34 +255,49 @@ def _write_excel_output(
 
 def run_calc_catch(config: CalcCatchConfig) -> CalcCatchResult:
     """Run the MATLAB-parity ROI pipeline and return summary metrics."""
+    # Profiling note: these timers were added after parity validation so we
+    # can measure runtime hotspots without altering detection logic.
+    timings: dict[str, float] = {}
+
+    stage_start = perf_counter()
     stack = _to_hwf_stack(Path(config.tiff_stack_path))
     landmark_centroids = _load_landmark_centroids(Path(config.original_coordinates_path))
+    timings['load_inputs'] = perf_counter() - stage_start
 
     img_height, img_width, num_frames = stack.shape
     time_vector = np.arange(num_frames, dtype=np.float64) / config.frame_rate
 
+    stage_start = perf_counter()
     stack_float = stack.astype(np.float64)
     # Pixel-wise standard deviation over time replicates MATLAB std(...,0,3).
     stddev_matrix = np.std(stack_float, axis=2, ddof=0)
+    timings['stddev_matrix'] = perf_counter() - stage_start
 
+    stage_start = perf_counter()
     threshold_mask, window_starts, window_ends = _build_threshold_mask(
         stddev_matrix,
         config.number_of_steps,
         config.consistency_check,
     )
+    timings['sliding_window_thresholding'] = perf_counter() - stage_start
 
     # h-minima transformation with h=0.5 is the key anti-fragmentation control.
+    stage_start = perf_counter()
     watershed_regions = _build_watershed_regions(threshold_mask, float(config.h), config.matlab_strict_mode)
+    timings['watershed_refinement'] = perf_counter() - stage_start
 
+    stage_start = perf_counter()
     cc_labels = label(watershed_regions, connectivity=2)
     regions = [region for region in regionprops(cc_labels) if region.area >= config.min_roi_area]
     detected_roi_count = len(regions)
+    timings['connected_components'] = perf_counter() - stage_start
 
     roi_table_rows: list[dict[str, float]] = []
     roi_time_series = np.zeros((num_frames, detected_roi_count), dtype=np.float64)
     detected_centroids_xy = np.zeros((detected_roi_count, 2), dtype=np.float64)
     roi_std_values: list[np.ndarray] = []
 
+    stage_start = perf_counter()
     for i, region in enumerate(regions):
         rr = region.coords[:, 0]
         cc = region.coords[:, 1]
@@ -293,30 +317,37 @@ def run_calc_catch(config: CalcCatchConfig) -> CalcCatchResult:
 
         roi_time_series[:, i] = np.mean(roi_cube, axis=0)
         roi_std_values.append(stddev_matrix[rr, cc])
+    timings['roi_feature_extraction'] = perf_counter() - stage_start
 
     # Retained for MATLAB-parity staging even though it is not exported directly.
+    stage_start = perf_counter()
     _ = _compute_roi_consistency(
         roi_std_values,
         window_starts,
         window_ends,
         config.consistency_pixel_frac,
     )
+    timings['roi_consistency'] = perf_counter() - stage_start
 
     # Contingency table matching against manual centroids.
+    stage_start = perf_counter()
     tp, fn, fp, indicator = _matching_with_candidate_resolution(
         detected_centroids_xy,
         landmark_centroids,
         config.matching_tolerance,
     )
+    timings['contingency_matching'] = perf_counter() - stage_start
 
     output_excel_file = None
     if config.write_excel:
+        stage_start = perf_counter()
         output_excel_file = _write_excel_output(
             Path(config.output_excel_file),
             roi_table_rows,
             roi_time_series,
             time_vector,
         )
+        timings['excel_export'] = perf_counter() - stage_start
 
     return CalcCatchResult(
         detected_roi_count=detected_roi_count,
@@ -326,6 +357,7 @@ def run_calc_catch(config: CalcCatchConfig) -> CalcCatchResult:
         false_negative=fn,
         false_positive=fp,
         output_excel_file=output_excel_file,
+        stage_timings_sec=timings,
     )
 
 

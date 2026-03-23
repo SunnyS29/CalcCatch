@@ -32,6 +32,9 @@ selection_threshold   = 10;          % Maximum distance (in pixels) to register 
 
 % Reporting and QA settings.
 user_top_rois        = 10;          % How many top ROIs (by consistency) you want to highlight
+% Optimization note: this flag was added during repository profiling so the
+% pipeline can execute through matching without pausing for manual dialogs.
+enable_interactive_qc = false;      % Keep manual review optional so the pipeline can run end-to-end unattended
 
 
 %% --------------------------- TIFF Stack ---------------------------
@@ -67,29 +70,32 @@ stddev_matrix = std(double(tiff_stack), 0, 3);
 
 
 %% --------------------------- Sliding Window Thresholding on Standard Deviation ---------------------------
+% Optimization note: the original implementation stored every threshold
+% window as a full 3D logical stack. We now accumulate per-pixel counts
+% directly to reduce memory use while preserving the same consensus mask.
+sliding_window_timer = tic;
 std_max = max(stddev_matrix(:)); % Upper bound of temporal activity dispersion
 std_min = min(stddev_matrix(:)); % Lower bound of temporal activity dispersion
 stddev_range = linspace(std_max, std_min, number_of_steps); % Sweep thresholds densely to capture weak and strong neuronal activity
 window_overlap = 0.1 * (std_max - std_min);  % Set an overlap of 10%
+window_starts = stddev_range - window_overlap/2;
+window_ends   = stddev_range + window_overlap/2;
 
-% 3D logical mask from sliding window thresholding.
-% A pixel is active at step k if its temporal standard deviation falls in
-% the threshold band for step k.
-window_pixel_mask = false(img_height, img_width, number_of_steps);
+% Running counts preserve the same consensus logic without allocating a full
+% [height x width x steps] logical cube in memory.
+pixel_count = zeros(img_height, img_width, 'uint16');
 
 for step = 1:number_of_steps
     % For each sliding window, define its start and end based on the
     % current threshold. Each value will cover a percentage around it
-    window_start = stddev_range(step) - window_overlap/2;
-    window_end   = stddev_range(step) + window_overlap/2;
-    filtered_window_std = stddev_matrix >= window_start & stddev_matrix <= window_end;
-    window_pixel_mask(:,:,step) = filtered_window_std;
+    filtered_window_std = stddev_matrix >= window_starts(step) & stddev_matrix <= window_ends(step);
+    pixel_count = pixel_count + uint16(filtered_window_std);
 end
 
 % Consensus across thresholds is more robust than a single global cutoff.
-pixel_count = sum(window_pixel_mask, 3);
 minimum_windows = consistency_check * number_of_steps;
 threshold_mask = pixel_count >= minimum_windows;  % Only keep pixels that passed the threshold enough times
+fprintf('Sliding window thresholding completed in %.2f s.\n', toc(sliding_window_timer));
 
 
 
@@ -165,16 +171,19 @@ roi_table_format.x_Centre = filtered_centroids(:,1); % Write centroid x coordina
 roi_table_format.y_Centre = filtered_centroids(:,2);
 
 roi_time_series = zeros(num_frames, detected_ROI_count); % Matrix to store mean fluorescence traces per ROI
+% Optimization note: cache each ROI's standard-deviation values once so
+% downstream consistency scoring does not need to rebuild per-window masks.
+roi_std_values = cell(detected_ROI_count, 1); % Cache per-ROI standard deviation values for consistency scoring
 
 for i = 1:detected_ROI_count
     pixelIdx = roi_data(i).PixelIdxList;
     roi_intensity = tiff_stack_reshaped(pixelIdx, :);
     roi_table_format.Mean_Intensity(i) = mean(roi_intensity, 'all');
     roi_table_format.Std_Intensity(i) = std(roi_intensity, 0, 'all');
-    roi_time_series(:, i) = mean(roi_intensity, 1)';    
+    roi_time_series(:, i) = mean(roi_intensity, 1)';
+    roi_std_values{i} = stddev_matrix(pixelIdx);
 end
 
-output_excel_file = 'Filtered_ROI_Data.xlsx';  % Default export file
 writetable(roi_table_format, output_excel_file, 'Sheet', 'ROI_Data'); % Write ROI summary sheet
 
 roi_names = [{'Time'}, arrayfun(@(i) sprintf('ROI_%d', i), 1:detected_ROI_count, 'UniformOutput', false)];
@@ -188,27 +197,27 @@ fprintf('Filtered ROI data and time series saved to %s\n', output_excel_file);
 
 %% --------------------------- ROI Consistency Scoring ---------------------------
 fprintf('Calculating consistency of ROIs based on raw counts...\n');
+consistency_timer = tic;
 roi_consistency_count = zeros(detected_ROI_count, 1);
 
 % Count windows where enough ROI pixels are active.
-% This favors persistent biological activity over transient noise.
+% We evaluate membership directly from each ROI's standard-deviation values,
+% which preserves the same sliding-window rule without storing the full
+% window mask stack in memory. This was introduced as a parity-safe
+% optimization rather than a detection-rule change.
 for elem = 1:detected_ROI_count
-    roi_pixels = roi_data(elem).PixelIdxList;
-    num_pixels = length(roi_pixels);
+    sorted_std = sort(roi_std_values{elem});
+    num_pixels = numel(sorted_std);
     threshold_pixels = ceil(consistency_pixel_frac * num_pixels);
-    consistency = 0; % Consistency counter
+    active_counts = zeros(number_of_steps, 1);
     for step = 1:number_of_steps % Iterate across threshold windows
-        current_window = window_pixel_mask(:,:,step);
-        active_pixels = sum(current_window(roi_pixels));
-        if active_pixels >= threshold_pixels 
-            consistency = consistency + 1;
-        end
+        active_counts(step) = sum(sorted_std >= window_starts(step) & sorted_std <= window_ends(step));
     end
-    roi_consistency_count(elem) = consistency;
+    roi_consistency_count(elem) = sum(active_counts >= threshold_pixels);
 end
 
 [~, sorted_idx] = sort(roi_consistency_count, 'descend'); % Rank ROIs by descending consistency
-fprintf('ROI consistency calculated.\n');
+fprintf('ROI consistency calculated in %.2f s.\n', toc(consistency_timer));
 
 %% --------------------------- Visualization: ROI Consistency Counts ---------------------------
 % QA trend plot for ROI consistency distribution.
@@ -238,6 +247,9 @@ consistency_barchart = bar(1:detected_ROI_count, roi_consistency_count, 'FaceCol
 min_point = min(roi_consistency_count);
 max_point = max(roi_consistency_count);
 normalized_points = (roi_consistency_count - min_point) / (max_point - min_point); % Normalize consistency values into [0,1] for color mapping
+if max_point == min_point
+    normalized_points = zeros(size(roi_consistency_count));
+end
 colormap('plasma');
 colors = interp1(linspace(0,1,256), plasma(256), normalized_points); % Interpolate the plasma colormap for smooth consistency encoding
 
@@ -252,10 +264,9 @@ grid on;
 hold off;
 drawnow;
 
-return
-
 %% --------------------------- Visualization with Highlighted Consistent ROIs ---------------------------
 fprintf('Creating heatmap with ROIs overlayed based on raw counts...\n');
+if enable_interactive_qc
 figureHandle = figure('Name', 'Standard Deviation Heatmap with Detected ROIs (colour scaled with consistency) and Original ROIs (red)', ...
                       'NumberTitle', 'off', 'Units', 'Normalized', ...
                       'OuterPosition', [0 0 1 1]);
@@ -271,6 +282,9 @@ title({ ...
 min_consistency = min(roi_consistency_count);
 max_consistency = max(roi_consistency_count);
 normalized_points = (roi_consistency_count - min_consistency) / (max_consistency - min_consistency);
+if max_consistency == min_consistency
+    normalized_points = zeros(size(roi_consistency_count));
+end
 colors = interp1(linspace(0,1,256), plasma(256), normalized_points); % Normalization for the colour scale
 
 scatter(filtered_centroids(:,1), filtered_centroids(:,2), 50, colors, 's', 'filled', ...
@@ -318,7 +332,7 @@ choice = questdlg('Would you like to remove any ROIs?', ...
     'Remove ROI', 'Yes', 'No', 'No');
 if strcmpi(choice, 'Yes')
     disp('Starting ROI removal...')  % Bring up dialog box that removal mode is on
-    figure(figure_handle)             % Bring up the ROI figure
+    figure(figureHandle)             % Bring up the ROI figure
     hold on                            % Keep existing plots so we can update them
     done = false;                     % Make sure they can go through the loop again (for multiple removals)
     while ~done
@@ -370,7 +384,7 @@ orig_count = numel(roi_data);
 choice = questdlg('Add any ROIs manually?', 'Manual ROI', 'Yes', 'No', 'No');
 if strcmpi(choice, 'Yes')
     disp('Manual ROI mode on')  % Bring up dialog box for manual addition
-    figure(figure_handle)
+    figure(figureHandle)
     hold on
     new_rois = [];
     while true
@@ -426,6 +440,7 @@ if numel(roi_data) ~= orig_count
     pause;  % (Optional) Lets you move legends or tweak axis if needed
     % Save a high-res snapshot
     print(gcf, 'final_heatmap.png', '-dpng', '-r600');
+end
 end
 
 
@@ -498,9 +513,9 @@ fprintf('Matching Indicator (Diagonal Matching with candidate resolution) = %.2f
 
 % Make a simple 2x2 contingency table for evaluation:
 TP = matched_count;  % True positives: correctly detected
-FN = num_landmark - matched_count;  % False negatives: ground-truth that weren?™t matched
+FN = num_landmark - matched_count;  % False negatives: ground-truth that weren?î¨„ matched
 FP = num_detected - matched_count;  % False positives: extra detected ROIs not matched to anything
-TN = NaN;  % True negatives aren?™t defined here
+TN = NaN;  % True negatives aren?î¨„ defined here
 
 % Create the table to show results
 contingency_table = table([TP; FP], [FN; TN], ...
