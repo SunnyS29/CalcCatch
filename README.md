@@ -25,15 +25,6 @@ Quantify small-world structure and identify functional hub neurons through graph
 ## Performance
 CalcCatch achieved a matching indicator of approximately **0.59**, more than doubling the benchmark Detect MATLAB toolbox result (**0.30**).*
 
-Experimental subnote:
-- Baseline matching indicator: `0.593`
-- Morphological filtering: `0.465`
-- Consistency-based ROI rejection: `0.349`
-- Rigid motion correction: `0.523`
-- Conservative merge filter: `0.593`
-
-These branch-level tests did not improve the baseline detection score on the real validation dataset. The conservative merge rule slightly reduced false positives, but it did not improve the matching indicator.
-
 ## File Setup
 Place local inputs in `data/` and keep script paths pointed to project-relative files.
 
