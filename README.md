@@ -62,6 +62,38 @@ python calc_catch.py \
 ## MATLAB Scripts
 - `CalcCatch.m`: Current MATLAB pipeline.
 
+## MATLAB Dependencies
+As of March 28, 2026, the MATLAB pipeline does not require a code change for compatibility with the current MathWorks function behavior used here.
+
+Required:
+- MATLAB
+- Image Processing Toolbox
+
+Used from Image Processing Toolbox:
+- `bwdist`
+- `imhmin`
+- `watershed`
+- `imdilate`
+- `strel`
+- `bwconncomp`
+- `regionprops`
+- ROI drawing and masking for manual QC with `drawpolygon` and ROI `createMask`
+
+Included with base MATLAB and used by this script:
+- `imfinfo`
+- `imread`
+- `readtable`
+- `writetable`
+- plotting and UI functions such as `figure`, `imagesc`, `scatter`, `questdlg`, and `ginput`
+
+Optional:
+- Parallel Computing Toolbox for thread-based or GPU acceleration only. It is not required for correctness or reproducibility of the pipeline.
+
+Compatibility notes:
+- `readtable` with `VariableNamingRule` remains current and avoids the older `PreserveVariableNames` pattern.
+- `bwdist` gained expanded GPU support for 3-D images in R2025a, but this script does not depend on GPU execution.
+- The interactive manual curation block requires a desktop MATLAB session with graphics support because it uses ROI drawing and dialog functions.
+
 ## Python Scripts
 - `calc_catch.py`: Python parity baseline with ROI extraction, Excel export, and contingency table matching.
 - `requirements.txt`: Python dependencies.

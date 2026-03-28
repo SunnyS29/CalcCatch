@@ -3,6 +3,11 @@
 % remain reproducible across experiments.
 % Downstream functional connectivity is computed with Pearson correlation
 % and Transfer Entropy as complementary synchronous and directional metrics.
+% Dependency note reviewed March 28 2026:
+% This script requires MATLAB and Image Processing Toolbox.
+% Parallel Computing Toolbox is optional and only relevant for acceleration.
+% The manual QC block also requires a desktop graphics session because it
+% uses dialog functions and interactive ROI drawing.
 
 
 %% --------------------------- Adjustable Parameters ---------------------------
