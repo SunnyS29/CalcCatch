@@ -101,6 +101,8 @@ Compatibility notes:
 ## License
 MIT. See `LICENSE`.
 
+---
+
 *Experimental subnote:
 - Baseline matching indicator: `0.593`
 - Morphological filtering: `0.465`
