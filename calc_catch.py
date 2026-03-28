@@ -24,9 +24,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import tifffile
-from scipy.ndimage import binary_dilation, distance_transform_edt
+from scipy.ndimage import binary_dilation, distance_transform_edt, shift as ndi_shift
 from skimage.measure import label, regionprops
 from skimage.morphology import disk, reconstruction
+from skimage.registration import phase_cross_correlation
 from skimage.segmentation import watershed
 
 
@@ -43,6 +44,7 @@ class CalcCatchConfig:
     merge_centroid_distance_px: float | None = None
     merge_trace_correlation: float | None = None
     merge_bbox_gap_px: float | None = None
+    rigid_motion_correction: bool = False
     h: float = 0.5
     frame_rate: float = 2.0
     matching_tolerance: float = 10.0
@@ -61,6 +63,7 @@ class CalcCatchResult:
     output_excel_file: str | None
     consistency_filter_summary: dict[str, float | int]
     merge_summary: dict[str, float | int]
+    motion_correction_summary: dict[str, float | int]
     # Profiling note: stage timings were added during optimization review so
     # we can identify bottlenecks without changing ROI detection semantics.
     stage_timings_sec: dict[str, float]
@@ -411,6 +414,43 @@ def _apply_merge_filter(
     )
 
 
+def _apply_rigid_motion_correction(
+    stack_float: np.ndarray,
+    enabled: bool,
+) -> tuple[np.ndarray, dict[str, float | int]]:
+    """Optionally align frames by rigid x/y translation before activity mapping."""
+    if not enabled:
+        summary = {
+            'enabled': 0,
+            'mean_shift_px': 0.0,
+            'max_shift_px': 0.0,
+        }
+        return stack_float, summary
+
+    corrected = np.array(stack_float, copy=True)
+    reference = corrected[:, :, 0]
+    shift_norms: list[float] = []
+
+    for frame_idx in range(1, corrected.shape[2]):
+        moving = corrected[:, :, frame_idx]
+        shift, _, _ = phase_cross_correlation(reference, moving, upsample_factor=10)
+        corrected[:, :, frame_idx] = ndi_shift(
+            moving,
+            shift=shift,
+            order=1,
+            mode='nearest',
+            prefilter=False,
+        )
+        shift_norms.append(float(np.linalg.norm(shift)))
+
+    summary = {
+        'enabled': 1,
+        'mean_shift_px': float(np.mean(shift_norms)) if shift_norms else 0.0,
+        'max_shift_px': float(np.max(shift_norms)) if shift_norms else 0.0,
+    }
+    return corrected, summary
+
+
 def _write_excel_output(
     output_path: Path,
     roi_table_rows: list[dict[str, float]],
@@ -445,6 +485,10 @@ def run_calc_catch(config: CalcCatchConfig) -> CalcCatchResult:
 
     stage_start = perf_counter()
     stack_float = stack.astype(np.float64)
+    stack_float, motion_correction_summary = _apply_rigid_motion_correction(
+        stack_float,
+        config.rigid_motion_correction,
+    )
     # Pixel-wise standard deviation over time replicates MATLAB std(...,0,3).
     stddev_matrix = np.std(stack_float, axis=2, ddof=0)
     timings['stddev_matrix'] = perf_counter() - stage_start
@@ -575,6 +619,7 @@ def run_calc_catch(config: CalcCatchConfig) -> CalcCatchResult:
         output_excel_file=output_excel_file,
         consistency_filter_summary=consistency_filter_summary,
         merge_summary=merge_summary,
+        motion_correction_summary=motion_correction_summary,
         stage_timings_sec=timings,
     )
 
@@ -596,6 +641,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--merge-centroid-distance-px', type=float, default=None)
     parser.add_argument('--merge-trace-correlation', type=float, default=None)
     parser.add_argument('--merge-bbox-gap-px', type=float, default=None)
+    parser.add_argument('--rigid-motion-correction', action='store_true')
     parser.add_argument('--h', type=float, default=0.5)
     parser.add_argument('--frame-rate', type=float, default=2.0)
     parser.add_argument('--matching-tolerance', type=float, default=10.0)
@@ -626,6 +672,7 @@ def main() -> None:
         merge_centroid_distance_px=args.merge_centroid_distance_px,
         merge_trace_correlation=args.merge_trace_correlation,
         merge_bbox_gap_px=args.merge_bbox_gap_px,
+        rigid_motion_correction=args.rigid_motion_correction,
         h=args.h,
         frame_rate=args.frame_rate,
         matching_tolerance=args.matching_tolerance,
