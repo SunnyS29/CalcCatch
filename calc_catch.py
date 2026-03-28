@@ -39,6 +39,10 @@ class CalcCatchConfig:
     consistency_check: float = 0.075
     consistency_pixel_frac: float = 0.70
     min_roi_area: int = 10
+    min_roi_consistency_ratio: float | None = None
+    merge_centroid_distance_px: float | None = None
+    merge_trace_correlation: float | None = None
+    merge_bbox_gap_px: float | None = None
     h: float = 0.5
     frame_rate: float = 2.0
     matching_tolerance: float = 10.0
@@ -55,6 +59,8 @@ class CalcCatchResult:
     false_negative: int
     false_positive: int
     output_excel_file: str | None
+    consistency_filter_summary: dict[str, float | int]
+    merge_summary: dict[str, float | int]
     # Profiling note: stage timings were added during optimization review so
     # we can identify bottlenecks without changing ROI detection semantics.
     stage_timings_sec: dict[str, float]
@@ -235,6 +241,176 @@ def _compute_roi_consistency(
     return scores
 
 
+def _apply_consistency_filter(
+    consistency_scores: np.ndarray,
+    number_of_steps: int,
+    min_roi_consistency_ratio: float | None,
+) -> tuple[np.ndarray, dict[str, float | int]]:
+    """Optionally reject ROIs with weak support across the sliding-window sweep."""
+    if min_roi_consistency_ratio is None:
+        keep_mask = np.ones(consistency_scores.shape[0], dtype=bool)
+        summary = {
+            'pre_consistency_filter_regions': int(consistency_scores.shape[0]),
+            'post_consistency_filter_regions': int(consistency_scores.shape[0]),
+            'min_roi_consistency_ratio': -1.0,
+            'minimum_count': -1,
+        }
+        return keep_mask, summary
+
+    minimum_count = int(np.ceil(min_roi_consistency_ratio * number_of_steps))
+    keep_mask = consistency_scores >= minimum_count
+    summary = {
+        'pre_consistency_filter_regions': int(consistency_scores.shape[0]),
+        'post_consistency_filter_regions': int(np.sum(keep_mask)),
+        'min_roi_consistency_ratio': float(min_roi_consistency_ratio),
+        'minimum_count': minimum_count,
+    }
+    return keep_mask, summary
+
+
+def _bbox_gap(bbox_a: tuple[int, int, int, int], bbox_b: tuple[int, int, int, int]) -> float:
+    """Return the pixel gap between two bounding boxes along their closest edges."""
+    min_row_a, min_col_a, max_row_a, max_col_a = bbox_a
+    min_row_b, min_col_b, max_row_b, max_col_b = bbox_b
+
+    row_gap = max(0, max(min_row_b - max_row_a, min_row_a - max_row_b))
+    col_gap = max(0, max(min_col_b - max_col_a, min_col_a - max_col_b))
+    return float(max(row_gap, col_gap))
+
+
+def _trace_correlation(trace_a: np.ndarray, trace_b: np.ndarray) -> float:
+    """Compute Pearson correlation between two ROI mean traces."""
+    std_a = float(np.std(trace_a))
+    std_b = float(np.std(trace_b))
+    if std_a == 0.0 or std_b == 0.0:
+        return -1.0
+    return float(np.corrcoef(trace_a, trace_b)[0, 1])
+
+
+def _apply_merge_filter(
+    detected_centroids_xy: np.ndarray,
+    roi_time_series: np.ndarray,
+    roi_table_rows: list[dict[str, float]],
+    roi_areas: np.ndarray,
+    roi_bboxes: list[tuple[int, int, int, int]],
+    merge_centroid_distance_px: float | None,
+    merge_trace_correlation: float | None,
+    merge_bbox_gap_px: float | None,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    list[dict[str, float]],
+    np.ndarray,
+    list[tuple[int, int, int, int]],
+    dict[str, float | int],
+]:
+    """Optionally merge ROI pairs that are both spatially close and temporally redundant."""
+    roi_count = detected_centroids_xy.shape[0]
+    if (
+        merge_centroid_distance_px is None
+        or merge_trace_correlation is None
+        or merge_bbox_gap_px is None
+        or roi_count == 0
+    ):
+        summary = {
+            'pre_merge_regions': int(roi_count),
+            'post_merge_regions': int(roi_count),
+            'merge_centroid_distance_px': -1.0,
+            'merge_trace_correlation': -1.0,
+            'merge_bbox_gap_px': -1.0,
+            'merge_links': 0,
+        }
+        return detected_centroids_xy, roi_time_series, roi_table_rows, roi_areas, roi_bboxes, summary
+
+    parent = np.arange(roi_count, dtype=np.int64)
+    merge_links = 0
+
+    def find(idx: int) -> int:
+        while parent[idx] != idx:
+            parent[idx] = parent[parent[idx]]
+            idx = parent[idx]
+        return idx
+
+    def union(idx_a: int, idx_b: int) -> None:
+        root_a = find(idx_a)
+        root_b = find(idx_b)
+        if root_a != root_b:
+            parent[root_b] = root_a
+
+    for i in range(roi_count):
+        for j in range(i + 1, roi_count):
+            centroid_distance = float(np.linalg.norm(detected_centroids_xy[i] - detected_centroids_xy[j]))
+            if centroid_distance > merge_centroid_distance_px:
+                continue
+            if _bbox_gap(roi_bboxes[i], roi_bboxes[j]) > merge_bbox_gap_px:
+                continue
+            if _trace_correlation(roi_time_series[:, i], roi_time_series[:, j]) < merge_trace_correlation:
+                continue
+            union(i, j)
+            merge_links += 1
+
+    groups: dict[int, list[int]] = {}
+    for idx in range(roi_count):
+        root = find(idx)
+        groups.setdefault(root, []).append(idx)
+
+    if len(groups) == roi_count:
+        summary = {
+            'pre_merge_regions': int(roi_count),
+            'post_merge_regions': int(roi_count),
+            'merge_centroid_distance_px': float(merge_centroid_distance_px),
+            'merge_trace_correlation': float(merge_trace_correlation),
+            'merge_bbox_gap_px': float(merge_bbox_gap_px),
+            'merge_links': int(merge_links),
+        }
+        return detected_centroids_xy, roi_time_series, roi_table_rows, roi_areas, roi_bboxes, summary
+
+    merged_centroids: list[np.ndarray] = []
+    merged_traces: list[np.ndarray] = []
+    merged_rows: list[dict[str, float]] = []
+    merged_areas: list[float] = []
+    merged_bboxes: list[tuple[int, int, int, int]] = []
+
+    for group in groups.values():
+        group_areas = roi_areas[group]
+        area_sum = float(np.sum(group_areas))
+        weights = group_areas / area_sum if area_sum > 0 else np.full(len(group), 1.0 / len(group))
+
+        merged_centroids.append(np.sum(detected_centroids_xy[group] * weights[:, None], axis=0))
+        merged_traces.append(np.sum(roi_time_series[:, group] * weights[None, :], axis=1))
+        merged_rows.append(
+            {
+                'x_Centre': float(np.sum(detected_centroids_xy[group, 0] * weights)),
+                'y_Centre': float(np.sum(detected_centroids_xy[group, 1] * weights)),
+                'Mean_Intensity': float(np.sum([roi_table_rows[idx]['Mean_Intensity'] * weights[k] for k, idx in enumerate(group)])),
+                'Std_Intensity': float(np.sum([roi_table_rows[idx]['Std_Intensity'] * weights[k] for k, idx in enumerate(group)])),
+            }
+        )
+        merged_areas.append(area_sum)
+        min_row = min(roi_bboxes[idx][0] for idx in group)
+        min_col = min(roi_bboxes[idx][1] for idx in group)
+        max_row = max(roi_bboxes[idx][2] for idx in group)
+        max_col = max(roi_bboxes[idx][3] for idx in group)
+        merged_bboxes.append((min_row, min_col, max_row, max_col))
+
+    summary = {
+        'pre_merge_regions': int(roi_count),
+        'post_merge_regions': int(len(merged_rows)),
+        'merge_centroid_distance_px': float(merge_centroid_distance_px),
+        'merge_trace_correlation': float(merge_trace_correlation),
+        'merge_bbox_gap_px': float(merge_bbox_gap_px),
+        'merge_links': int(merge_links),
+    }
+    return (
+        np.asarray(merged_centroids, dtype=np.float64),
+        np.column_stack(merged_traces),
+        merged_rows,
+        np.asarray(merged_areas, dtype=np.float64),
+        merged_bboxes,
+        summary,
+    )
+
+
 def _write_excel_output(
     output_path: Path,
     roi_table_rows: list[dict[str, float]],
@@ -296,6 +472,8 @@ def run_calc_catch(config: CalcCatchConfig) -> CalcCatchResult:
     roi_time_series = np.zeros((num_frames, detected_roi_count), dtype=np.float64)
     detected_centroids_xy = np.zeros((detected_roi_count, 2), dtype=np.float64)
     roi_std_values: list[np.ndarray] = []
+    roi_areas = np.zeros(detected_roi_count, dtype=np.float64)
+    roi_bboxes: list[tuple[int, int, int, int]] = []
 
     stage_start = perf_counter()
     for i, region in enumerate(regions):
@@ -305,6 +483,8 @@ def run_calc_catch(config: CalcCatchConfig) -> CalcCatchResult:
 
         y_centre, x_centre = region.centroid
         detected_centroids_xy[i] = [x_centre, y_centre]
+        roi_areas[i] = float(region.area)
+        roi_bboxes.append(tuple(int(value) for value in region.bbox))
 
         roi_table_rows.append(
             {
@@ -319,15 +499,51 @@ def run_calc_catch(config: CalcCatchConfig) -> CalcCatchResult:
         roi_std_values.append(stddev_matrix[rr, cc])
     timings['roi_feature_extraction'] = perf_counter() - stage_start
 
-    # Retained for MATLAB-parity staging even though it is not exported directly.
+    # This keeps the original MATLAB-style consistency score available for
+    # ranking, and in this experiment it can also be used as an optional
+    # post-detection acceptance rule.
     stage_start = perf_counter()
-    _ = _compute_roi_consistency(
+    roi_consistency_scores = _compute_roi_consistency(
         roi_std_values,
         window_starts,
         window_ends,
         config.consistency_pixel_frac,
     )
+    keep_mask, consistency_filter_summary = _apply_consistency_filter(
+        roi_consistency_scores,
+        config.number_of_steps,
+        config.min_roi_consistency_ratio,
+    )
+    if not np.all(keep_mask):
+        roi_table_rows = [row for row, keep in zip(roi_table_rows, keep_mask) if keep]
+        roi_time_series = roi_time_series[:, keep_mask]
+        detected_centroids_xy = detected_centroids_xy[keep_mask]
+        roi_std_values = [values for values, keep in zip(roi_std_values, keep_mask) if keep]
+        roi_areas = roi_areas[keep_mask]
+        roi_bboxes = [bbox for bbox, keep in zip(roi_bboxes, keep_mask) if keep]
+        detected_roi_count = int(np.sum(keep_mask))
     timings['roi_consistency'] = perf_counter() - stage_start
+
+    stage_start = perf_counter()
+    (
+        detected_centroids_xy,
+        roi_time_series,
+        roi_table_rows,
+        roi_areas,
+        roi_bboxes,
+        merge_summary,
+    ) = _apply_merge_filter(
+        detected_centroids_xy,
+        roi_time_series,
+        roi_table_rows,
+        roi_areas,
+        roi_bboxes,
+        config.merge_centroid_distance_px,
+        config.merge_trace_correlation,
+        config.merge_bbox_gap_px,
+    )
+    detected_roi_count = detected_centroids_xy.shape[0]
+    timings['roi_merge'] = perf_counter() - stage_start
 
     # Contingency table matching against manual centroids.
     stage_start = perf_counter()
@@ -357,6 +573,8 @@ def run_calc_catch(config: CalcCatchConfig) -> CalcCatchResult:
         false_negative=fn,
         false_positive=fp,
         output_excel_file=output_excel_file,
+        consistency_filter_summary=consistency_filter_summary,
+        merge_summary=merge_summary,
         stage_timings_sec=timings,
     )
 
@@ -374,6 +592,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--consistency-check', type=float, default=0.075)
     parser.add_argument('--consistency-pixel-frac', type=float, default=0.70)
     parser.add_argument('--min-roi-area', type=int, default=10)
+    parser.add_argument('--min-roi-consistency-ratio', type=float, default=None)
+    parser.add_argument('--merge-centroid-distance-px', type=float, default=None)
+    parser.add_argument('--merge-trace-correlation', type=float, default=None)
+    parser.add_argument('--merge-bbox-gap-px', type=float, default=None)
     parser.add_argument('--h', type=float, default=0.5)
     parser.add_argument('--frame-rate', type=float, default=2.0)
     parser.add_argument('--matching-tolerance', type=float, default=10.0)
@@ -400,6 +622,10 @@ def main() -> None:
         consistency_check=args.consistency_check,
         consistency_pixel_frac=args.consistency_pixel_frac,
         min_roi_area=args.min_roi_area,
+        min_roi_consistency_ratio=args.min_roi_consistency_ratio,
+        merge_centroid_distance_px=args.merge_centroid_distance_px,
+        merge_trace_correlation=args.merge_trace_correlation,
+        merge_bbox_gap_px=args.merge_bbox_gap_px,
         h=args.h,
         frame_rate=args.frame_rate,
         matching_tolerance=args.matching_tolerance,
