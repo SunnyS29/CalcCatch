@@ -44,6 +44,7 @@ class CalcCatchConfig:
     matching_tolerance: float = 10.0
     write_excel: bool = True
     matlab_strict_mode: bool = True
+    exclude_background_rois: bool = False
 
 
 @dataclass
@@ -58,6 +59,7 @@ class CalcCatchResult:
     # Profiling note: stage timings were added during optimization review so
     # we can identify bottlenecks without changing ROI detection semantics.
     stage_timings_sec: dict[str, float]
+    excluded_background_roi_count: int = 0
 
 
 def _normalize_header(value: Any) -> str:
@@ -178,6 +180,22 @@ def _build_watershed_regions(threshold_mask: np.ndarray, h: float, strict_mode: 
     return threshold_mask & (~ridges)
 
 
+def _filter_background_regions(regions, cc_labels, threshold_mask):
+    """Keep whole ROIs with at least half their pixels in the activity mask.
+
+    Strict watershed returns complement-of-ridge components, which can include
+    large background basins. Filter those before extracting intensity cubes;
+    retained regions keep their geometry, order and centroids.
+    """
+    if not regions:
+        return []
+    active_counts = np.bincount(
+        cc_labels.ravel(), weights=threshold_mask.ravel()
+    )
+    return [region for region in regions
+            if 2 * active_counts[region.label] >= region.area]
+
+
 def _matching_with_candidate_resolution(
     detected_xy: np.ndarray,
     landmark_xy: np.ndarray,
@@ -242,7 +260,9 @@ def _write_excel_output(
     time_vector: np.ndarray,
 ) -> str:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    roi_df = pd.DataFrame(roi_table_rows)
+    roi_df = pd.DataFrame(roi_table_rows, columns=[
+        'x_Centre', 'y_Centre', 'Mean_Intensity', 'Std_Intensity'
+    ])
     time_df = pd.DataFrame(roi_time_series, columns=[f'ROI_{i + 1}' for i in range(roi_time_series.shape[1])])
     time_df.insert(0, 'Time', time_vector)
 
@@ -289,6 +309,11 @@ def run_calc_catch(config: CalcCatchConfig) -> CalcCatchResult:
     stage_start = perf_counter()
     cc_labels = label(watershed_regions, connectivity=2)
     regions = [region for region in regionprops(cc_labels) if region.area >= config.min_roi_area]
+    excluded_background_roi_count = 0
+    if config.exclude_background_rois:
+        previous_count = len(regions)
+        regions = _filter_background_regions(regions, cc_labels, threshold_mask)
+        excluded_background_roi_count = previous_count - len(regions)
     detected_roi_count = len(regions)
     timings['connected_components'] = perf_counter() - stage_start
 
@@ -358,6 +383,7 @@ def run_calc_catch(config: CalcCatchConfig) -> CalcCatchResult:
         false_positive=fp,
         output_excel_file=output_excel_file,
         stage_timings_sec=timings,
+        excluded_background_roi_count=excluded_background_roi_count,
     )
 
 
@@ -374,6 +400,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--consistency-check', type=float, default=0.075)
     parser.add_argument('--consistency-pixel-frac', type=float, default=0.70)
     parser.add_argument('--min-roi-area', type=int, default=10)
+    parser.add_argument(
+        '--exclude-background-rois',
+        action='store_true',
+        help='Exclude ROIs with fewer than half their pixels in the activity mask (experimental).',
+    )
     parser.add_argument('--h', type=float, default=0.5)
     parser.add_argument('--frame-rate', type=float, default=2.0)
     parser.add_argument('--matching-tolerance', type=float, default=10.0)
@@ -405,6 +436,7 @@ def main() -> None:
         matching_tolerance=args.matching_tolerance,
         write_excel=not args.no_excel,
         matlab_strict_mode=not args.no_matlab_strict_mode,
+        exclude_background_rois=args.exclude_background_rois,
     )
 
     result = run_calc_catch(config)
