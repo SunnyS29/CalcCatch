@@ -25,6 +25,12 @@ Quantify small-world structure and identify functional hub neurons through graph
 ## Performance
 CalcCatch achieved a matching indicator of approximately **0.59**, more than doubling the benchmark Detect MATLAB toolbox result (**0.30**).*
 
+Recent Python improvements are available as optional additions:
+- Faster threshold calculation reduced full-pipeline runtime from **3.04 s to 1.68 s** in a local benchmark, with unchanged detection results.
+- Background-ROI filtering reduced unmatched detections from **36 to 31** on the annotated recording, increasing precision from **58.62% to 62.20%** while keeping the matching indicator unchanged.
+
+These results use local recordings; accuracy improvements still need validation on additional annotated datasets. The original defaults and MATLAB workflow remain unchanged. See [performance notes](PERFORMANCE.md) and [background-filter results](BACKGROUND_FILTER.md) for details.
+
 ## File Setup
 Place local inputs in `data/` and keep script paths pointed to project-relative files.
 
@@ -59,6 +65,10 @@ python calc_catch.py \
   --metrics-json results/metrics_python.json
 ```
 
+For faster threshold calculation, replace `python calc_catch.py` with `python optimized_calc_catch.py` in the command above. Add `--exclude-background-rois` to optionally exclude regions with fewer than half their pixels supported by the activity mask.
+
+Run the regression tests with `python -m unittest discover -v`.
+
 ## MATLAB Scripts
 - `CalcCatch.m`: Current MATLAB pipeline.
 
@@ -74,6 +84,8 @@ Optional:
 
 ## Python Scripts
 - `calc_catch.py`: Python parity baseline with ROI extraction, Excel export, and contingency table matching.
+- `optimized_calc_catch.py`: Optional faster Python runner with the same command-line arguments.
+- `benchmark_improvements.py` and `benchmark_background_rois.py`: Reproducible performance and validation benchmarks using local data.
 - `requirements.txt`: Python dependencies.
 
 ## License
