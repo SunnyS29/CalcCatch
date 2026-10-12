@@ -16,8 +16,6 @@ import sys
 from time import perf_counter
 
 import numpy as np
-from scipy.sparse import csr_matrix
-from scipy.sparse.csgraph import maximum_bipartite_matching
 from skimage.measure import label, regionprops
 
 import calc_catch as c
@@ -27,11 +25,7 @@ from optimized_calc_catch import build_threshold_mask
 def score(xy, landmarks):
     tp, fn, fp, recall = c._matching_with_candidate_resolution(xy, landmarks, 10.)
     n, m = len(xy), len(landmarks)
-    optimal = 0
-    if n and m:
-        edges = np.max(np.abs(landmarks[:, None] - xy[None]), axis=2) <= 10.
-        assignment = maximum_bipartite_matching(csr_matrix(edges), perm_type='column')
-        optimal = int(np.count_nonzero(assignment >= 0))
+    optimal = c._optimal_match_count(xy, landmarks, 10.)
     return dict(detections=n, landmarks=m, tp=tp, fn=fn, fp=fp,
                 recall=recall, precision=tp/n if n else 0.,
                 f1=2*tp/(n+m) if n+m else 0., optimal_tp=optimal,

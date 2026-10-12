@@ -45,6 +45,13 @@ class MatchingTests(unittest.TestCase):
         self.assertEqual((a['tp'], b['tp']), (1, 2))
         self.assertEqual((a['optimal_tp'], b['optimal_tp']), (2, 2))
 
+    def test_pipeline_optimal_count_matches_benchmark(self):
+        xy = np.array([[0., 0.], [18., 0.]])
+        landmarks = np.array([[8., 0.], [-10., 0.]])
+        for order in (landmarks, landmarks[::-1]):
+            self.assertEqual(calc_catch._optimal_match_count(xy, order, 10.), 2)
+        self.assertEqual(calc_catch._optimal_match_count(xy[:0], landmarks, 10.), 0)
+
     def test_extra_detections_reduce_f1(self):
         landmarks = np.array([[0., 0.]])
         self.assertEqual(score(landmarks, landmarks)['optimal_f1'], 1.)

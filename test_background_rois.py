@@ -77,6 +77,12 @@ class BackgroundRegionTests(unittest.TestCase):
                 min_roi_area=1, exclude_background_rois=True))
             self.assertEqual((baseline.detected_roi_count, filtered.detected_roi_count), (2, 1))
             self.assertEqual(filtered.excluded_background_roi_count, 1)
+            # One of two detections matches the single annotation.
+            self.assertEqual(baseline.matching_indicator, 1.)
+            self.assertEqual(baseline.precision, .5)
+            self.assertAlmostEqual(baseline.f1, 2/3)
+            self.assertEqual(baseline.optimal_matched_count, 1)
+            self.assertEqual((filtered.precision, filtered.f1), (1., 1.))
             np.testing.assert_array_equal(exports[0][1][:, :1], exports[1][1])
             self.assertEqual(exports[0][0][:1], exports[1][0])
             np.testing.assert_array_equal(exports[0][2], exports[1][2])
@@ -86,6 +92,8 @@ class BackgroundRegionTests(unittest.TestCase):
             self.assertEqual(empty.detected_roi_count, 0)
             self.assertEqual(empty.excluded_background_roi_count, 2)
             self.assertEqual(exports[-1][1].shape, (6, 0))
+            self.assertTrue(np.isnan(empty.precision))
+            self.assertEqual((empty.f1, empty.optimal_matched_count), (0., 0))
 
 
 if __name__ == '__main__':

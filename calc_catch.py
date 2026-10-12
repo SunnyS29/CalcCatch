@@ -11,7 +11,7 @@ This module mirrors the MATLAB ROI detection path used in the thesis:
 6. contingency table matching against manual centroids
 
 The exported ROI time series are intended for downstream transfer entropy
-and graph-theoretical connectivity analyses.
+and graph-theoretical connectivity analyses, which are not part of this module.
 """
 
 import argparse
@@ -25,6 +25,8 @@ import numpy as np
 import pandas as pd
 import tifffile
 from scipy.ndimage import binary_dilation, distance_transform_edt
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import maximum_bipartite_matching
 from skimage.measure import label, regionprops
 from skimage.morphology import disk, reconstruction
 from skimage.segmentation import watershed
@@ -60,6 +62,13 @@ class CalcCatchResult:
     # we can identify bottlenecks without changing ROI detection semantics.
     stage_timings_sec: dict[str, float]
     excluded_background_roi_count: int = 0
+    # matching_indicator is recall (matched / manual ROIs), so extra detections
+    # never lower it. Precision and F1 report the cost of false detections.
+    precision: float = float('nan')
+    f1: float = float('nan')
+    # Order-independent maximum matching, reported alongside the legacy
+    # greedy count, which can depend on annotation order.
+    optimal_matched_count: int = 0
 
 
 def _normalize_header(value: Any) -> str:
@@ -232,6 +241,19 @@ def _matching_with_candidate_resolution(
     return tp, fn, fp, indicator
 
 
+def _optimal_match_count(
+    detected_xy: np.ndarray,
+    landmark_xy: np.ndarray,
+    tolerance: float,
+) -> int:
+    """Maximum number of one-to-one matches within the same square tolerance."""
+    if detected_xy.shape[0] == 0 or landmark_xy.shape[0] == 0:
+        return 0
+    edges = np.max(np.abs(landmark_xy[:, None] - detected_xy[None]), axis=2) <= tolerance
+    assignment = maximum_bipartite_matching(csr_matrix(edges), perm_type='column')
+    return int(np.count_nonzero(assignment >= 0))
+
+
 def _compute_roi_consistency(
     roi_std_values: list[np.ndarray],
     window_starts: np.ndarray,
@@ -361,6 +383,13 @@ def run_calc_catch(config: CalcCatchConfig) -> CalcCatchResult:
         landmark_centroids,
         config.matching_tolerance,
     )
+    optimal_matched_count = _optimal_match_count(
+        detected_centroids_xy,
+        landmark_centroids,
+        config.matching_tolerance,
+    )
+    precision = tp / detected_roi_count if detected_roi_count else float('nan')
+    f1 = 2 * tp / (detected_roi_count + tp + fn) if detected_roi_count + tp + fn else float('nan')
     timings['contingency_matching'] = perf_counter() - stage_start
 
     output_excel_file = None
@@ -384,6 +413,9 @@ def run_calc_catch(config: CalcCatchConfig) -> CalcCatchResult:
         output_excel_file=output_excel_file,
         stage_timings_sec=timings,
         excluded_background_roi_count=excluded_background_roi_count,
+        precision=float(precision),
+        f1=float(f1),
+        optimal_matched_count=optimal_matched_count,
     )
 
 

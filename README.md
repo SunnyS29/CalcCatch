@@ -2,6 +2,8 @@
 
 CalcCatch is a pipeline for automated ROI detection and functional connectivity analysis in Enteric Nervous System calcium imaging datasets.
 
+This repository contains stations 1–3 (ROI detection and validation) in MATLAB and Python. Both export ROI time series for stations 4–5; that connectivity and network analysis was part of the thesis workflow but is not included here.
+
 ## The Problem
 Manual ROI annotation for ENS neurons is a major bottleneck and can require up to 4 months of expert labor. CalcCatch was developed as a Master's project at the University of Melbourne to provide a scalable and objective alternative.
 
@@ -16,14 +18,16 @@ Apply sliding window thresholding to pixel-wise standard deviation and identify 
 ### Station 3: Watershed Refinement
 Use a negative distance transform with h-minima transformation before watershed segmentation to suppress noise and reduce over-segmentation in dense neuron clusters.
 
-### Station 4: Connectivity Reconstruction
+### Station 4: Connectivity Reconstruction (not included in this repository)
 Reconstruct functional networks using Pearson correlation and transfer entropy. Pearson correlation captures synchronous activity and transfer entropy captures directional information flow.
 
-### Station 5: Network Characterization
+### Station 5: Network Characterization (not included in this repository)
 Quantify small-world structure and identify functional hub neurons through graph-theoretical metrics.
 
 ## Performance
-CalcCatch achieved a matching indicator of approximately **0.59**, more than doubling the benchmark Detect MATLAB toolbox result (**0.30**).*
+CalcCatch achieved a matching indicator of approximately **0.59**, compared with **0.30** for the benchmark Detect MATLAB toolbox.*
+
+The matching indicator is recall: the share of manually annotated ROIs matched by a detection (51 of 86). It does not penalise extra detections. On the same recording, 51 of 87 detections matched an annotation, giving **precision 0.59** and **F1 0.59**. The Python pipeline now reports precision, F1 and an order-independent match count alongside the matching indicator.
 
 Recent Python improvements are available as optional additions:
 - Faster threshold calculation reduced full-pipeline runtime from **3.04 s to 1.68 s** in a local benchmark, with unchanged detection results.
@@ -67,7 +71,7 @@ python calc_catch.py \
 
 For faster threshold calculation, replace `python calc_catch.py` with `python optimized_calc_catch.py` in the command above. Add `--exclude-background-rois` to optionally exclude regions with fewer than half their pixels supported by the activity mask.
 
-Run the regression tests with `python -m unittest discover -v`.
+Run the regression tests with `python -m unittest discover -v`. They use synthetic inputs and also run on GitHub Actions for each push.
 
 ## MATLAB Scripts
 - `CalcCatch.m`: Current MATLAB pipeline.
